@@ -13,7 +13,8 @@
     "data:build": "node scripts/build-data.mjs data/raw public/data",
     "data": "npm run data:fetch && npm run data:catastro && npm run data:dem && npm run data:build",
     "data:dem": "node scripts/fetch-dem.mjs data/raw/dem",
-    "data:catastro": "node scripts/fetch-catastro.mjs data/raw/catastro"
+    "data:catastro": "node scripts/fetch-catastro.mjs data/raw/catastro",
+    "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "earcut": "^3.2.4",
@@ -22,6 +23,7 @@
   "devDependencies": {
     "@types/three": "^0.186.0",
     "typescript": "^7.0.2",
-    "vite": "^8.3.5"
+    "vite": "^8.3.5",
+    "wrangler": "^4.152.0"
   }
 }

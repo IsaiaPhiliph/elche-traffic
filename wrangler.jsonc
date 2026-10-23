@@ -1,0 +1,6 @@
+// Despliegue en Cloudflare Workers como sitio estático (npm run deploy).
+{
+  "name": "elche-traffic",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "./dist" }
+}
