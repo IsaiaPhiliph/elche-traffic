@@ -1,0 +1,26 @@
+{
+  "name": "elche-traffic",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Simulador de tráfico 3D de Elche (Elx) basado en datos reales de OpenStreetMap",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "data:fetch": "node scripts/fetch-osm.mjs data/raw",
+    "data:build": "node scripts/build-data.mjs data/raw public/data",
+    "data": "npm run data:fetch && npm run data:catastro && npm run data:build",
+    "data:catastro": "node scripts/fetch-catastro.mjs data/raw/catastro"
+  },
+  "dependencies": {
+    "earcut": "^3.2.4",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.186.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
+  }
+}

@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Elx · Simulador de tráfico 3D</title>
+    <meta name="description" content="Simulador microscópico de tráfico de Elche con visualización 3D sobre datos reales de OpenStreetMap y Catastro." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23101820'/%3E%3Cpath d='M32 10c-3 8-9 12-16 13 7 2 12 6 14 12h4c2-6 7-10 14-12-7-1-13-5-16-13z' fill='%2347c27a'/%3E%3Crect x='30' y='30' width='4' height='24' rx='2' fill='%23c8a165'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="viewport"></div>
+
+      <header id="topbar" class="glass">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 64 64"><path d="M32 6c-3 9-10 14-18 15 8 2 14 7 16 14h4c2-7 8-12 16-14-8-1-15-6-18-15z" fill="currentColor"/><rect x="30" y="32" width="4" height="26" rx="2" fill="#c8a165"/></svg>
+          </span>
+          <div>
+            <strong>Elx · Trànsit 3D</strong>
+            <small>Simulador de tráfico de Elche</small>
+          </div>
+        </div>
+        <div class="clock">
+          <span id="clock-time">--:--</span>
+          <span id="clock-sub">cargando…</span>
+        </div>
+        <div class="transport">
+          <button id="btn-play" class="icon-btn" title="Pausar / reanudar (espacio)" aria-label="Pausar o reanudar">
+            <svg id="ico-pause" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+            <svg id="ico-play" viewBox="0 0 24 24" hidden><path d="M8 5v14l11-7z"/></svg>
+          </button>
+          <div class="seg" id="speed-seg" role="group" aria-label="Velocidad de simulación">
+            <button data-speed="1">×1</button>
+            <button data-speed="2">×2</button>
+            <button data-speed="5">×5</button>
+            <button data-speed="10" class="on">×10</button>
+            <button data-speed="30">×30</button>
+            <button data-speed="60">×60</button>
+          </div>
+          <span id="eff-speed" class="muted" title="Velocidad real alcanzada">×0</span>
+        </div>
+      </header>
+
+      <aside id="leftpanel" class="glass panel">
+        <button class="panel-toggle" data-target="leftpanel" aria-label="Plegar panel">‹</button>
+        <div class="panel-body">
+          <section>
+            <h3>Hora del día</h3>
+            <div class="row">
+              <input type="range" id="in-hour" min="0" max="24" step="0.25" value="8" />
+              <output id="out-hour">08:00</output>
+            </div>
+            <label class="check"><input type="checkbox" id="in-lock" /> Mantener la demanda de esta hora</label>
+            <div class="row">
+              <span class="lbl">Época del año</span>
+              <select id="in-season" title="Afecta a la posición del sol y a las horas de luz">
+                <option value="135">Primavera (15 de mayo)</option>
+                <option value="196">Verano (15 de julio)</option>
+                <option value="296">Otoño (23 de octubre)</option>
+                <option value="15">Invierno (15 de enero)</option>
+              </select>
+            </div>
+          </section>
+
+          <section>
+            <h3>Demanda</h3>
+            <div class="row">
+              <span class="lbl">Nivel</span>
+              <input type="range" id="in-demand" min="0.2" max="2" step="0.05" value="1" />
+              <output id="out-demand">100 %</output>
+            </div>
+            <div class="row">
+              <span class="lbl">Máx. vehículos</span>
+              <input type="range" id="in-maxveh" min="500" max="16000" step="500" value="9000" />
+              <output id="out-maxveh">9000</output>
+            </div>
+            <label class="check"><input type="checkbox" id="in-buses" checked /> Autobuses urbanos (líneas reales)</label>
+            <label class="check"><input type="checkbox" id="in-reroute" checked /> Reencaminamiento dinámico</label>
+            <button id="btn-reset" class="ghost">Vaciar la red</button>
+          </section>
+
+          <section>
+            <h3>Semáforos</h3>
+            <div class="row">
+              <span class="lbl">Modo</span>
+              <select id="in-sigmode">
+                <option value="fixed">Tiempo fijo</option>
+                <option value="wave">Onda verde (E–O)</option>
+                <option value="actuated">Accionados por demanda</option>
+                <option value="off">Apagados (ámbar)</option>
+              </select>
+            </div>
+            <div class="row">
+              <span class="lbl">Ciclo</span>
+              <input type="range" id="in-cycle" min="50" max="150" step="5" value="90" />
+              <output id="out-cycle">90 s</output>
+            </div>
+          </section>
+
+          <section>
+            <h3>Escenarios</h3>
+            <div class="chips" id="scenarios">
+              <button data-sc="morning">Punta mañana</button>
+              <button data-sc="noon">Mediodía</button>
+              <button data-sc="evening">Punta tarde</button>
+              <button data-sc="night">Noche</button>
+              <button data-sc="match">Partido del Elche CF</button>
+              <button data-sc="zbe">ZBE centro histórico</button>
+              <button data-sc="canalejas">Cortar Pont de Canalejas</button>
+              <button data-sc="altamira">Cortar Pont d'Altamira</button>
+              <button data-sc="clear" class="ghost">Restablecer</button>
+            </div>
+          </section>
+
+          <section>
+            <h3>Capas</h3>
+            <div class="toggles">
+              <label class="check"><input type="checkbox" data-layer="buildings" checked /> Edificios</label>
+              <label class="check"><input type="checkbox" data-layer="trees" checked /> Palmeral y arbolado</label>
+              <label class="check"><input type="checkbox" data-layer="heat" /> Congestión</label>
+              <label class="check"><input type="checkbox" data-layer="signals" checked /> Semáforos</label>
+              <label class="check"><input type="checkbox" data-layer="labels" checked /> Lugares</label>
+              <label class="check"><input type="checkbox" data-layer="shadows" checked /> Sombras</label>
+            </div>
+          </section>
+
+          <section>
+            <h3>Herramienta</h3>
+            <div class="seg wide" id="tool-seg">
+              <button data-tool="inspect" class="on">Inspeccionar</button>
+              <button data-tool="close">Cortar / abrir calles</button>
+            </div>
+            <p class="hint" id="tool-hint">Pulsa un vehículo, un semáforo o una calle para ver sus datos.</p>
+          </section>
+        </div>
+      </aside>
+
+      <aside id="rightpanel" class="glass panel">
+        <button class="panel-toggle" data-target="rightpanel" aria-label="Plegar panel">›</button>
+        <div class="panel-body">
+          <section>
+            <h3>Estado de la red</h3>
+            <div class="tiles">
+              <div class="tile"><span class="k">Vehículos</span><span class="v" id="st-veh">0</span></div>
+              <div class="tile"><span class="k">Velocidad media</span><span class="v" id="st-speed">0</span><span class="u">km/h</span></div>
+              <div class="tile"><span class="k">Viajes completados</span><span class="v" id="st-thr">0</span><span class="u">/h</span></div>
+              <div class="tile"><span class="k">Tiempo de viaje</span><span class="v" id="st-trip">0</span><span class="u">min</span></div>
+              <div class="tile"><span class="k">Demora media</span><span class="v" id="st-delay">0</span><span class="u">min</span></div>
+              <div class="tile"><span class="k">Detenidos</span><span class="v" id="st-stop">0</span><span class="u">%</span></div>
+              <div class="tile"><span class="k">CO₂ emitido</span><span class="v" id="st-co2">0</span><span class="u">t/h</span></div>
+              <div class="tile"><span class="k">Demanda</span><span class="v" id="st-dem">0</span><span class="u">viajes/h</span></div>
+            </div>
+          </section>
+          <section>
+            <h3>Últimas horas simuladas</h3>
+            <canvas id="chart" width="560" height="200"></canvas>
+            <div class="legend-inline">
+              <span><i style="background: var(--accent)"></i>Vehículos</span>
+              <span><i style="background: var(--warn)"></i>Velocidad media</span>
+            </div>
+          </section>
+          <section>
+            <h3>Composición</h3>
+            <div class="mix" id="mix"></div>
+            <div class="mix-legend" id="mix-legend"></div>
+          </section>
+          <section class="small muted" id="sources">
+            Datos: © colaboradores de OpenStreetMap (ODbL) · Edificios: © Dirección General del Catastro (INSPIRE) · Demanda calibrada con el PMUS de Elche y aforos públicos.
+          </section>
+        </div>
+      </aside>
+
+      <div id="infocard" class="glass" hidden>
+        <button class="close" id="info-close" aria-label="Cerrar">×</button>
+        <div id="info-body"></div>
+      </div>
+
+      <nav id="bottombar" class="glass">
+        <div class="chips" id="presets"></div>
+      </nav>
+
+      <div id="heat-legend" class="glass" hidden>
+        <span>Fluido</span><div class="ramp"></div><span>Detenido</span>
+      </div>
+
+      <div id="loading">
+        <div class="loading-card">
+          <div class="brand-mark big"><svg viewBox="0 0 64 64"><path d="M32 6c-3 9-10 14-18 15 8 2 14 7 16 14h4c2-7 8-12 16-14-8-1-15-6-18-15z" fill="currentColor"/><rect x="30" y="32" width="4" height="26" rx="2" fill="#c8a165"/></svg></div>
+          <h1>Elx · Trànsit 3D</h1>
+          <p id="loading-step">Preparando…</p>
+          <div class="bar"><div id="loading-bar"></div></div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
