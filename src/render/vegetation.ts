@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { TreesJSON } from './data';
+import type { Terrain } from './terrain';
 
 const CHUNK = 600;
 const LOD_FAR = 1200;
@@ -113,7 +114,7 @@ function pineLow() {
   return finish([stick(0.3, 7, 0x6d543d), blob(3.4, 1.4, 7.6, 0x4c6e36)]);
 }
 
-export function buildVegetation(data: TreesJSON): THREE.Group {
+export function buildVegetation(data: TreesJSON, terrain: Terrain): THREE.Group {
   const group = new THREE.Group();
   group.name = 'trees';
   const geos = [
@@ -144,8 +145,9 @@ export function buildVegetation(data: TreesJSON): THREE.Group {
     const kind = kindStr;
     const cx = (ci + 0.5) * CHUNK;
     const cz = (cj + 0.5) * CHUNK;
+    const cy = terrain.heightAt(cx, cz);
     const lod = new THREE.LOD();
-    lod.position.set(cx, 0, cz);
+    lod.position.set(cx, cy, cz);
     const levels = geos[kind].map((geo) => {
       const mesh = new THREE.InstancedMesh(geo, mat, list.length);
       mesh.castShadow = true;
@@ -155,7 +157,7 @@ export function buildVegetation(data: TreesJSON): THREE.Group {
       q.setFromAxisAngle(up, rnd() * Math.PI * 2);
       const tall = kind === 0 ? sc * (0.85 + rnd() * 0.4) : sc;
       s.set(sc, tall, sc);
-      pos.set(x - cx, 0, z - cz);
+      pos.set(x - cx, terrain.heightAt(x, z) - 0.2 - cy, z - cz);
       m.compose(pos, q, s);
       for (const mesh of levels) mesh.setMatrixAt(i, m);
     });

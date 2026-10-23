@@ -1,7 +1,8 @@
 // Terreno: usos del suelo, cauce del Vinalopó, plazas y vías del tren pintados en una
-// textura (sin solapes ni z-fighting) sobre un plano que recibe sombras.
+// textura (sin solapes ni z-fighting) sobre la malla del relieve, que recibe sombras.
 import * as THREE from 'three';
 import type { AreasJSON, RoadsJSON } from './data';
+import type { Terrain } from './terrain';
 
 export const AREA_COLORS: Record<string, string> = {
   residential: '#d8d0c2',
@@ -49,7 +50,7 @@ function unpackPolys(data: number[], cb: (type: number, rings: number[][]) => vo
   }
 }
 
-export function buildGround(areas: AreasJSON, roads: RoadsJSON, ext: GroundExtent, maxTex: number): THREE.Group {
+export function buildGround(areas: AreasJSON, roads: RoadsJSON, ext: GroundExtent, maxTex: number, terrain: Terrain): THREE.Group {
   const group = new THREE.Group();
   const W = ext.maxX - ext.minX;
   const H = ext.maxZ - ext.minZ;
@@ -165,46 +166,204 @@ export function buildGround(areas: AreasJSON, roads: RoadsJSON, ext: GroundExten
   edge(0, 0, 0, fade, 0, 0, cw, fade);
   edge(0, ch, 0, ch - fade, 0, ch - fade, cw, fade);
 
+  // Trincheras de los pasos inferiores: el suelo se recorta (alfa 0) donde la calzada va por
+  // debajo de la superficie; en los túneles se mantiene, porque es su cubierta.
+  g.globalCompositeOperation = 'destination-out';
+  g.strokeStyle = '#000';
+  g.lineCap = 'butt';
+  g.lineJoin = 'round';
+  for (const sg of roads.segments) {
+    if (!(sg.f & 16) || sg.f & 4) continue;
+    g.lineWidth = (sg.w + 1.2) * scale;
+    const P = sg.p;
+    let open = false;
+    for (let k = 0; k < P.length; k += 3) {
+      const deep = terrain.heightAt(P[k], P[k + 2]) - P[k + 1] > 0.25;
+      if (deep && !open) {
+        g.beginPath();
+        const b = Math.max(0, k - 3);
+        g.moveTo(tx(P[b]), tz(P[b + 2]));
+        open = true;
+      }
+      if (open) g.lineTo(tx(P[k]), tz(P[k + 2]));
+      if (open && (!deep || k + 3 >= P.length)) {
+        g.stroke();
+        open = false;
+      }
+    }
+  }
+  g.globalCompositeOperation = 'source-over';
+
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 8;
   tex.generateMipmaps = true;
   tex.minFilter = THREE.LinearMipmapLinearFilter;
-
-  const geo = new THREE.PlaneGeometry(W, H);
-  geo.rotateX(-Math.PI / 2);
-  geo.translate(ext.minX + W / 2, 0, ext.minZ + H / 2);
-  const mat = new THREE.MeshLambertMaterial({ map: tex });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.receiveShadow = true;
-  mesh.name = 'ground';
-  group.add(mesh);
-
-  // Entorno más allá del área de estudio (camp d'Elx), con un hueco donde va el mapa para que
-  // ambos planos no se solapen (desde lejos se pelearían en el búfer de profundidad).
-  const R = 100000;
-  const inset = 2;
-  const outer = new THREE.Shape([
-    new THREE.Vector2(-R, -R),
-    new THREE.Vector2(R, -R),
-    new THREE.Vector2(R, R),
-    new THREE.Vector2(-R, R),
-  ]);
-  // La forma se dibuja en XY y se gira: y de la forma = −z del mundo.
-  outer.holes.push(
-    new THREE.Path([
-      new THREE.Vector2(ext.minX + inset, -(ext.maxZ - inset)),
-      new THREE.Vector2(ext.minX + inset, -(ext.minZ + inset)),
-      new THREE.Vector2(ext.maxX - inset, -(ext.minZ + inset)),
-      new THREE.Vector2(ext.maxX - inset, -(ext.maxZ - inset)),
-    ]),
-  );
-  const underGeo = new THREE.ShapeGeometry(outer);
-  underGeo.rotateX(-Math.PI / 2);
-  const under = new THREE.Mesh(underGeo, new THREE.MeshLambertMaterial({ color: OUTSIDE }));
-  under.position.y = -0.05;
-  under.receiveShadow = true;
-  under.name = 'outside';
-  group.add(under);
+  const mat = new THREE.MeshLambertMaterial({ map: tex, alphaTest: 0.5 });
+  const outsideMat = new THREE.MeshLambertMaterial({ color: OUTSIDE, side: THREE.DoubleSide });
+  if (terrain.flat) {
+    const geo = new THREE.PlaneGeometry(W, H);
+    geo.rotateX(-Math.PI / 2);
+    geo.translate(ext.minX + W / 2, 0, ext.minZ + H / 2);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.receiveShadow = true;
+    mesh.name = 'ground';
+    group.add(mesh);
+    const under = new THREE.Mesh(new THREE.PlaneGeometry(200000, 200000), outsideMat);
+    under.rotation.x = -Math.PI / 2;
+    under.position.y = -0.6;
+    group.add(under);
+    return group;
+  }
+  buildRelief(group, terrain, ext, mat, outsideMat);
   return group;
+}
+
+const CHUNK = 64; // celdas por bloque de la malla fina (frustum culling)
+const COARSE = 4; // la periferia se malla cada 4 celdas
+
+/**
+ * Malla del relieve: fina (paso de la rejilla) sobre el área con textura, gruesa en la periferia
+ * y un faldón horizontal hasta el horizonte. Las normales salen de diferencias centradas, así no
+ * hay costuras de sombreado entre bloques.
+ */
+function buildRelief(group: THREE.Group, t: Terrain, ext: GroundExtent, mat: THREE.Material, outsideMat: THREE.Material) {
+  const { nx, nz, step, x0, z0, h } = t;
+  const W = ext.maxX - ext.minX;
+  const H = ext.maxZ - ext.minZ;
+  const hAt = (i: number, j: number) => h[Math.min(nz - 1, Math.max(0, j)) * nx + Math.min(nx - 1, Math.max(0, i))];
+  const lastI = nx - 1;
+  const lastJ = nz - 1;
+  const coarseIdx = (n: number) => {
+    const a: number[] = [];
+    for (let k = 0; k < n - 1; k += COARSE) a.push(k);
+    a.push(n - 1);
+    return a;
+  };
+  const CI = coarseIdx(nx);
+  const CJ = coarseIdx(nz);
+  const snapDown = (v: number) => Math.max(0, Math.floor(v / COARSE) * COARSE);
+  const snapUp = (v: number, last: number) => Math.min(last, Math.ceil(v / COARSE) * COARSE);
+  const iA = snapDown((ext.minX - x0) / step);
+  const iB = snapUp((ext.maxX - x0) / step, lastI);
+  const jA = snapDown((ext.minZ - z0) / step);
+  const jB = snapUp((ext.maxZ - z0) / step, lastJ);
+
+  const pushVertex = (pos: number[], nrm: number[], uv: number[], i: number, j: number, d: number, y = hAt(i, j)) => {
+    const x = x0 + i * step;
+    const z = z0 + j * step;
+    pos.push(x, y, z);
+    const gx = (hAt(i + d, j) - hAt(i - d, j)) / (2 * d * step);
+    const gz = (hAt(i, j + d) - hAt(i, j - d)) / (2 * d * step);
+    const l = Math.hypot(gx, 1, gz);
+    nrm.push(-gx / l, 1 / l, -gz / l);
+    uv.push((x - ext.minX) / W, 1 - (z - ext.minZ) / H);
+  };
+  const finish = (pos: number[], nrm: number[], uv: number[], idx: number[], m: THREE.Material, name: string) => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geo.setIndex(pos.length / 3 > 65535 ? new THREE.Uint32BufferAttribute(idx, 1) : new THREE.Uint16BufferAttribute(idx, 1));
+    geo.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geo, m);
+    mesh.receiveShadow = true;
+    mesh.name = name;
+    group.add(mesh);
+  };
+
+  // Zona fina, por bloques.
+  for (let ci = iA; ci < iB; ci += CHUNK) {
+    for (let cj = jA; cj < jB; cj += CHUNK) {
+      const i1 = Math.min(iB, ci + CHUNK);
+      const j1 = Math.min(jB, cj + CHUNK);
+      const w = i1 - ci + 1;
+      const pos: number[] = [];
+      const nrm: number[] = [];
+      const uv: number[] = [];
+      const idx: number[] = [];
+      for (let j = cj; j <= j1; j++) for (let i = ci; i <= i1; i++) pushVertex(pos, nrm, uv, i, j, 1);
+      for (let j = 0; j < j1 - cj; j++) {
+        for (let i = 0; i < w - 1; i++) {
+          const a = j * w + i;
+          idx.push(a, a + w, a + 1, a + 1, a + w, a + w + 1);
+        }
+      }
+      // Faldón vertical en el contorno de la zona fina: tapa las rendijas con la malla gruesa.
+      const edge = (pts: [number, number][]) => {
+        for (let k = 1; k < pts.length; k++) {
+          const b = pos.length / 3;
+          for (const [i, j] of [pts[k - 1], pts[k]]) {
+            pushVertex(pos, nrm, uv, i, j, 1);
+            pushVertex(pos, nrm, uv, i, j, 1, hAt(i, j) - 3);
+          }
+          idx.push(b, b + 1, b + 2, b + 2, b + 1, b + 3, b, b + 2, b + 1, b + 2, b + 3, b + 1);
+        }
+      };
+      const run = (fixed: number, from: number, to: number, horiz: boolean) => {
+        const pts: [number, number][] = [];
+        for (let k = from; k <= to; k++) pts.push(horiz ? [k, fixed] : [fixed, k]);
+        edge(pts);
+      };
+      if (cj === jA) run(jA, ci, i1, true);
+      if (j1 === jB) run(jB, ci, i1, true);
+      if (ci === iA) run(iA, cj, j1, false);
+      if (i1 === iB) run(iB, cj, j1, false);
+      finish(pos, nrm, uv, idx, mat, 'ground');
+    }
+  }
+
+  // Periferia gruesa (sin las celdas de la zona fina).
+  {
+    const pos: number[] = [];
+    const nrm: number[] = [];
+    const uv: number[] = [];
+    const idx: number[] = [];
+    const w = CI.length;
+    for (const j of CJ) for (const i of CI) pushVertex(pos, nrm, uv, i, j, COARSE);
+    for (let b = 0; b < CJ.length - 1; b++) {
+      for (let a = 0; a < w - 1; a++) {
+        if (CI[a] >= iA && CI[a + 1] <= iB && CJ[b] >= jA && CJ[b + 1] <= jB) continue;
+        const k = b * w + a;
+        idx.push(k, k + w, k + 1, k + 1, k + w, k + w + 1);
+      }
+    }
+    finish(pos, nrm, uv, idx, mat, 'ground-outer');
+  }
+
+  // Faldón hasta el horizonte: el contorno de la rejilla ampliado radialmente a su misma cota.
+  {
+    const ring: [number, number][] = [];
+    for (const i of CI) ring.push([i, 0]);
+    for (const j of CJ.slice(1)) ring.push([lastI, j]);
+    for (const i of CI.slice(0, -1).reverse()) ring.push([i, lastJ]);
+    for (const j of CJ.slice(1, -1).reverse()) ring.push([0, j]);
+    const cx = x0 + (lastI * step) / 2;
+    const cz = z0 + (lastJ * step) / 2;
+    const pos: number[] = [];
+    const idx: number[] = [];
+    for (const [i, j] of ring) {
+      const x = x0 + i * step;
+      const z = z0 + j * step;
+      const y = hAt(i, j);
+      pos.push(x, y, z, cx + (x - cx) * 16, y, cz + (z - cz) * 16);
+    }
+    const n = ring.length;
+    for (let k = 0; k < n; k++) {
+      const a = 2 * k;
+      const b = 2 * ((k + 1) % n);
+      idx.push(a, a + 1, b, b, a + 1, b + 1);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    // Normales hacia arriba: el faldón es horizontal salvo por el desnivel del contorno.
+    const nr = geo.attributes.normal as THREE.BufferAttribute;
+    for (let k = 0; k < nr.count; k++) nr.setXYZ(k, 0, 1, 0);
+    const mesh = new THREE.Mesh(geo, outsideMat);
+    mesh.receiveShadow = true;
+    mesh.name = 'outside';
+    group.add(mesh);
+  }
 }

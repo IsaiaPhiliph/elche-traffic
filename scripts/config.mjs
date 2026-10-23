@@ -43,3 +43,12 @@ export const GATEWAY_DEFAULT_BY_CLASS = [
 
 // Líneas de autobús urbano con mayor demanda (Avanza Elx, 2026): mayor frecuencia.
 export const BUS_HEADWAY_MIN = { B: 12, D: 12, K1: 12, K2: 12, M: 12, default: 20 };
+
+// Extensión del modelo digital del terreno: el área de estudio con ~2 km de margen,
+// para que el relieve continúe más allá de las calles simuladas.
+export const DEM_BBOX = {
+  south: BBOX.south - 0.018,
+  west: BBOX.west - 0.023,
+  north: BBOX.north + 0.018,
+  east: BBOX.east + 0.023,
+};

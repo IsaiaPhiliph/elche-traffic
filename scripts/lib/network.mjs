@@ -130,7 +130,11 @@ function reverseSeg(s) {
   s.sameOrderEnd = !a;
 }
 
-export function buildNetwork(roadsJson, restrictionsJson, project) {
+/**
+ * `ground(x, z)`, opcional: altura del terreno (m, relativa al datum). Sin él la red es plana
+ * salvo los puentes y pasos inferiores.
+ */
+export function buildNetwork(roadsJson, restrictionsJson, project, ground = null) {
   const nodeById = new Map();
   for (const el of roadsJson.elements) {
     if (el.type === 'node') nodeById.set(el.id, el);
@@ -327,12 +331,11 @@ export function buildNetwork(roadsJson, restrictionsJson, project) {
     g.roundabout = g.ends.some((e) => segs[e.seg].roundabout);
   }
 
-  // --- Elevación: puentes que cruzan sobre otras vías y rampas de acceso ---
+  // --- Elevación: rasante = terreno + desnivel de puentes y pasos inferiores (con sus rampas) ---
   const elevation = computeElevation(segs, xz);
-  for (const s of segs) {
-    s.pts3 = s.nodes.map((id, i) => [s.pts[i][0], s.pts[i][1], elevation.get(id) ?? 0]);
-  }
-  for (const g of gNodes) g.y = elevation.get(g.id) ?? 0;
+  const base = ground ? computeBase(segs, xz, elevation, ground) : new Map();
+  for (const s of segs) s.pts3 = profile(s, xz, elevation, base, ground);
+  for (const g of gNodes) g.y = (base.get(g.id) ?? 0) + (elevation.get(g.id) ?? 0);
 
   // --- Recorte de tramos en los cruces (espacio de la intersección) ---
   for (const g of gNodes) {
@@ -369,7 +372,7 @@ export function buildNetwork(roadsJson, restrictionsJson, project) {
     }
     s.trimA = a;
     s.trimB = b;
-    s.tpts = G.slicePolyline(s.pts3, a, s.len - b); // [x, z, y]
+    s.tpts = G.slicePolyline(s.pts3, a, s.len - b); // [x, z, y, desnivel]
     s.tlen = Math.max(0.5, G.polylineLength(s.tpts.map((p) => [p[0], p[1]])));
   }
 
@@ -781,6 +784,107 @@ function splitAxes(angles) {
   return g;
 }
 
+/**
+ * Cota base de cada nudo OSM: el terreno, salvo en puentes, túneles y rampas, donde se interpola
+ * entre los extremos apoyados en el suelo (el tablero cruza el cauce en línea recta y el MDT,
+ * que ya recoge trincheras y terraplenes, no se suma dos veces al desnivel).
+ */
+function computeBase(segs, xz, rel, ground) {
+  const fixed = new Set();
+  const adj = new Map();
+  for (const s of segs) {
+    const structural = s.bridge || s.tunnel;
+    for (const n of s.nodes) if (!structural && Math.abs(rel.get(n) ?? 0) < 0.01) fixed.add(n);
+    for (let i = 1; i < s.nodes.length; i++) {
+      const a = s.nodes[i - 1];
+      const b = s.nodes[i];
+      const w = 1 / Math.max(1, G.dist(xz(a), xz(b)));
+      if (!adj.has(a)) adj.set(a, []);
+      if (!adj.has(b)) adj.set(b, []);
+      adj.get(a).push([b, w]);
+      adj.get(b).push([a, w]);
+    }
+  }
+  const base = new Map();
+  const free = [];
+  for (const n of adj.keys()) {
+    const p = xz(n);
+    base.set(n, ground(p[0], p[1]));
+    if (!fixed.has(n)) free.push(n);
+  }
+  // Gauss-Seidel con pesos 1/d: interpolación lineal a lo largo de cada cadena libre.
+  for (let it = 0; it < 600; it++) {
+    let change = 0;
+    for (const n of free) {
+      let s = 0;
+      let w = 0;
+      for (const [m, wm] of adj.get(n)) {
+        s += base.get(m) * wm;
+        w += wm;
+      }
+      const v = s / w;
+      change = Math.max(change, Math.abs(v - base.get(n)));
+      base.set(n, v);
+    }
+    if (change < 0.002) break;
+  }
+  return base;
+}
+
+/**
+ * Perfil longitudinal de un tramo: [x, z, y, desnivel] con puntos intermedios donde el terreno
+ * se aparta de la recta entre nudos (cada 8 m, simplificado con tolerancia de 12 cm).
+ */
+function profile(s, xz, rel, base, ground) {
+  const out = [];
+  const nodes = s.nodes;
+  const flatRun = !s.bridge && !s.tunnel;
+  for (let i = 0; i < nodes.length; i++) {
+    const p = s.pts[i];
+    const rB = rel.get(nodes[i]) ?? 0;
+    const bB = base.get(nodes[i]) ?? 0;
+    if (i > 0 && ground && flatRun) {
+      const q = s.pts[i - 1];
+      const rA = rel.get(nodes[i - 1]) ?? 0;
+      const bA = base.get(nodes[i - 1]) ?? 0;
+      const L = G.dist(p, q);
+      // Solo entre dos nudos apoyados en el terreno: en las rampas se interpola.
+      if (L > 12 && Math.abs(rA) < 0.01 && Math.abs(rB) < 0.01) {
+        const n = Math.ceil(L / 8);
+        const cand = [];
+        for (let k = 0; k <= n; k++) {
+          const t = k / n;
+          const x = q[0] + (p[0] - q[0]) * t;
+          const z = q[1] + (p[1] - q[1]) * t;
+          cand.push([x, z, k === 0 ? bA : k === n ? bB : ground(x, z), 0, t * L]);
+        }
+        const keep = new Uint8Array(cand.length);
+        keep[0] = keep[n] = 1;
+        const dp = (a, b) => {
+          let worst = -1;
+          let wd = 0.12;
+          for (let k = a + 1; k < b; k++) {
+            const t = (cand[k][4] - cand[a][4]) / (cand[b][4] - cand[a][4]);
+            const d = Math.abs(cand[k][2] - (cand[a][2] + (cand[b][2] - cand[a][2]) * t));
+            if (d > wd) {
+              wd = d;
+              worst = k;
+            }
+          }
+          if (worst < 0) return;
+          keep[worst] = 1;
+          dp(a, worst);
+          dp(worst, b);
+        };
+        dp(0, n);
+        for (let k = 1; k < n; k++) if (keep[k]) out.push(cand[k].slice(0, 4));
+      }
+    }
+    out.push([p[0], p[1], bB + rB, rB]);
+  }
+  return out;
+}
+
 function computeElevation(segs, xz) {
   const LAYER_H = 5.5;
   const GRADE = 0.06;
@@ -806,6 +910,30 @@ function computeElevation(segs, xz) {
     if (!over) return;
     for (const n of s.nodes) target.set(n, Math.max(target.get(n) ?? 0, LAYER_H * s.layer));
   });
+  // Pasos inferiores: tramos con capa negativa bajan bajo la rasante. Los túneles sin capa
+  // suelen ser soportales o pasajes cubiertos a nivel de calle y no se rebajan.
+  const below = new Map();
+  const underRoads = new Set();
+  for (const s of segs) {
+    if (s.bridge || s.layer >= 0) continue;
+    const depth = -LAYER_H * -s.layer;
+    for (const n of s.nodes) below.set(n, Math.min(below.get(n) ?? 0, depth));
+    underRoads.add(s.name || s.ref || `#${s.cls}`);
+  }
+  // Las rampas siguen la misma vía (mismo nombre), no las calles que cruzan o acometen.
+  const adjBelow = new Map();
+  for (const s of segs) {
+    if (!underRoads.has(s.name || s.ref || `#${s.cls}`)) continue;
+    for (let i = 1; i < s.nodes.length; i++) {
+      const a = s.nodes[i - 1];
+      const b = s.nodes[i];
+      const d = G.dist(xz(a), xz(b));
+      if (!adjBelow.has(a)) adjBelow.set(a, []);
+      if (!adjBelow.has(b)) adjBelow.set(b, []);
+      adjBelow.get(a).push([b, d]);
+      adjBelow.get(b).push([a, d]);
+    }
+  }
   // Propagación con pendiente máxima para generar rampas suaves.
   const adj = new Map();
   for (const s of segs) {
@@ -819,19 +947,25 @@ function computeElevation(segs, xz) {
       adj.get(b).push([a, d]);
     }
   }
-  const elev = new Map(target);
-  const queue = [...target.keys()];
-  while (queue.length) {
-    const n = queue.pop();
-    const h = elev.get(n);
-    for (const [m, d] of adj.get(n) ?? []) {
-      const c = h - GRADE * d;
-      if (c > 0.05 && c > (elev.get(m) ?? 0)) {
-        elev.set(m, c);
-        queue.push(m);
+  // Propagación con pendiente máxima (en los dos sentidos) para generar rampas suaves.
+  const spread = (seed, sign, graph) => {
+    const elev = new Map(seed);
+    const queue = [...seed.keys()];
+    while (queue.length) {
+      const n = queue.pop();
+      const h = elev.get(n) * sign;
+      for (const [m, d] of graph.get(n) ?? []) {
+        const c = h - GRADE * d;
+        if (c > 0.05 && c > (elev.get(m) ?? 0) * sign) {
+          elev.set(m, c * sign);
+          queue.push(m);
+        }
       }
     }
-  }
+    return elev;
+  };
+  const elev = spread(target, 1, adj);
+  for (const [n, v] of spread(below, -1, adjBelow)) elev.set(n, (elev.get(n) ?? 0) + v);
   return elev;
 }
 

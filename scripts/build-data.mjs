@@ -8,6 +8,7 @@ import { buildNetwork, CLASSES, EDGE_FLAGS } from './lib/network.mjs';
 import { processBuildings, processCatastroBuildings, BUILDING_CLASS } from './lib/buildings.mjs';
 import { readBuildingParts, readBuildingUses } from './lib/catastro.mjs';
 import { processAreas, generateTrees } from './lib/areas.mjs';
+import { loadTerrain, buildHeightGrid } from './lib/terrain.mjs';
 
 const [rawDir = 'data/raw', outDir = 'public/data'] = process.argv.slice(2);
 const load = async (n) => JSON.parse(await readFile(join(rawDir, `${n}.json`), 'utf8'));
@@ -16,9 +17,16 @@ const project = G.makeProjector(ORIGIN);
 const t0 = Date.now();
 const log = (...a) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s]`, ...a);
 
+// ---------------------------------------------------------------- relieve (MDT05 del IGN)
+const terrain = await loadTerrain(join(rawDir, 'dem'), ORIGIN, project);
+// Cota de referencia: el terreno en el centro del área, redondeado (y = 0 en la escena).
+const datum = terrain ? Math.round(terrain.at(0, 0)) : 0;
+const ground = terrain ? (x, z) => terrain.at(x, z) - datum : null;
+log(terrain ? `relieve: MDT05, datum ${datum} m` : 'relieve: sin MDT (data/raw/dem), red plana');
+
 // ---------------------------------------------------------------- red viaria
 const roadsRaw = await load('roads');
-const net = buildNetwork(roadsRaw, await load('restrictions'), project);
+const net = buildNetwork(roadsRaw, await load('restrictions'), project, ground);
 log('red', net.stats);
 const E = net.edges;
 const edgeIndex = new Map(E.map((e, i) => [e, i]));
@@ -389,8 +397,10 @@ const roadSegs = net.segs.map((s) => {
   if (s.roundabout) f |= 1;
   if (s.bridge) f |= 2;
   if (s.tunnel) f |= 4;
+  // Bajo la rasante del terreno (túnel o rampa en trinchera).
+  if (s.tpts.some((q) => q[3] < -0.4)) f |= 16;
   const urban = (c >= 4 && ![5, 7, 9].includes(c)) || (c === 2 && SIDEWALK_RE.test(s.name));
-  if (urban && !s.bridge && !s.tunnel && !s.roundabout) f |= 8;
+  if (urban && !s.bridge && !s.tunnel && !s.roundabout && !(f & 16)) f |= 8;
   // Marcas de detención: bit0/1 semáforo (fin/inicio), bit2/3 ceda el paso, bit4/5 STOP.
   let sl = 0;
   if (s.eF >= 0 && headSet.has(s.eF)) sl |= 1;
@@ -472,4 +482,29 @@ await write('buildings.json', buildings.json);
 await write('areas.json', areas.json);
 await write('trees.json', trees);
 await write('pois.json', pois);
+if (terrain) {
+  // Alturas en centímetros (Int16) respecto al datum, fila a fila (z creciente).
+  const hg = buildHeightGrid(terrain, datum, net.segs, 10);
+  const bin = new Int16Array(hg.h.length);
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let q = 0; q < bin.length; q++) {
+    bin[q] = Math.round(hg.h[q] * 100);
+    lo = Math.min(lo, hg.h[q]);
+    hi = Math.max(hi, hg.h[q]);
+  }
+  await writeFile(join(outDir, 'terrain.bin'), Buffer.from(bin.buffer));
+  await write('terrain.json', {
+    source: 'MDT05 © Instituto Geográfico Nacional (CC BY 4.0)',
+    datum,
+    x0: hg.x0,
+    z0: hg.z0,
+    step: hg.step,
+    nx: hg.nx,
+    nz: hg.nz,
+    min: G.round2(lo),
+    max: G.round2(hi),
+  });
+  log(`→ terrain.bin ${(bin.byteLength / 1e6).toFixed(2)} MB (${hg.nx}×${hg.nz}, ${lo.toFixed(1)}…${hi.toFixed(1)} m)`);
+}
 log('Listo.');

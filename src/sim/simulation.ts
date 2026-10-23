@@ -866,10 +866,18 @@ export class Simulation {
       const step = 1.3 * dt;
       this.latOff[v] = Math.abs(lo) <= step ? 0 : lo - Math.sign(lo) * step;
     }
-    // CO₂ instantáneo: potencia en rueda (inercia + rodadura + aerodinámica).
+    // CO₂ instantáneo: potencia en rueda (inercia + rodadura + pendiente + aerodinámica).
     const k = KP[this.kind[v]];
     const sp = this.v[v];
-    const P = k.mass * (Math.max(0, a) + 0.098) * sp + 0.6 * k.cda * sp * sp * sp;
+    let grade = 0;
+    const e = this.edge[v];
+    if (e >= 0) {
+      const net = this.net;
+      const i = (this.seg[v] = net.findSeg(e, Math.min(this.s[v], net.eLen[e]), this.seg[v]));
+      const run = net.pd[i + 1] - net.pd[i];
+      if (run > 0.5) grade = (net.py[i + 1] - net.py[i]) / run;
+    }
+    const P = k.mass * (Math.max(0, a) + 0.098 + 9.81 * grade) * sp + 0.6 * k.cda * sp * sp * sp;
     this.co2Window += (k.idle + 0.00028 * Math.max(0, P)) * dt;
   }
 

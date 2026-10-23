@@ -1,8 +1,8 @@
 # Elx · Trànsit 3D — simulador de tráfico de Elche
 
 Simulador microscópico del tráfico de **Elche (Elx)** con visualización 3D en el navegador.
-Cada vehículo se mueve por la red viaria real de la ciudad (OpenStreetMap), entre los
-62.000 edificios del Catastro, el Palmeral y las rondas, con semáforos, glorietas,
+Cada vehículo se mueve por la red viaria real de la ciudad (OpenStreetMap), sobre el relieve
+del MDT05 del IGN, entre los 62.000 edificios del Catastro, el Palmeral y las rondas, con semáforos, glorietas,
 prioridades, autobuses urbanos y una demanda que cambia a lo largo del día.
 
 ```bash
@@ -14,7 +14,7 @@ Los datos procesados ya están en `public/data/`, así que no hace falta descarg
 arrancar. Para regenerarlos desde las fuentes originales:
 
 ```bash
-npm run data       # OSM (Overpass) + Catastro (INSPIRE) + procesado
+npm run data       # OSM (Overpass) + Catastro (INSPIRE) + MDT05 (IGN) + procesado
 ```
 
 ## Qué incluye
@@ -24,6 +24,18 @@ npm run data       # OSM (Overpass) + Catastro (INSPIRE) + procesado
 - Red viaria de OSM recortada al casco urbano dentro de las rondas (≈7,3 × 6 km): 490 km de
   ejes, carriles por sentido, límites de velocidad, sentidos únicos, puentes con rampas y
   túneles.
+- **Relieve** del Modelo Digital del Terreno MDT05 del IGN (LiDAR del PNOA, malla de 5 m),
+  con 2 km de margen: el cauce del Vinalopó y sus barrancos, la subida hacia el norte y las
+  sierras del horizonte. El MDT del servicio WCS viene redondeado al metro, así que se suaviza
+  (≈15 m) antes de usarlo, y bajo las calles el terreno se iguala a la rasante.
+- **Rasante de las calles:** cada calle sigue el terreno (con puntos intermedios donde cambia
+  la pendiente). Los puentes van en línea recta entre sus estribos, de modo que el viaducto de
+  la A-7 queda a 30 m sobre el Vinalopó y las pilas bajan hasta el fondo del cauce.
+- **Pasos inferiores:** los tramos con capa negativa de OSM (Ronda Sud, President Adolfo
+  Suárez, Camí dels Arcs, Camí de l'Omet…) bajan 5,5 m por capa con rampas del 6 % a lo largo
+  de la misma vía. En la parte descubierta el suelo se recorta en trinchera con muros de
+  contención y pretil; en la cubierta hay hastiales, techo y bocas, y el terreno de encima
+  queda intacto. Los túneles sin capa (soportales, pasajes cubiertos) se dejan a nivel de calle.
 - 62.291 volúmenes de edificio del **Catastro** (INSPIRE), con su número real de plantas y uso
   (residencial, industrial, oficinas, comercio, servicios públicos). Los monumentos de OSM
   sustituyen a sus parcelas; la Basílica de Santa María lleva cúpula y campanario.
@@ -58,8 +70,8 @@ npm run data       # OSM (Overpass) + Catastro (INSPIRE) + procesado
   construida de cada calle según su uso, más polos (hospitales, universidad, centros
   comerciales, estaciones).
 - **Indicadores:** vehículos en red, velocidad media, viajes/h, tiempo y demora media,
-  porcentaje de detenidos, CO₂ estimado con un modelo de potencia en rueda, y mapa de
-  congestión por tramo.
+  porcentaje de detenidos, CO₂ estimado con un modelo de potencia en rueda (incluida la
+  pendiente de cada tramo), y mapa de congestión por tramo.
 
 ## Controles
 
@@ -106,11 +118,13 @@ están en `scripts/config.mjs`.
 scripts/                     preprocesado (Node)
   fetch-osm.mjs              descarga por Overpass (calles, edificios, usos, árboles, PDI, bus, tren)
   fetch-catastro.mjs         edificios INSPIRE del Catastro (municipio 03065)
+  fetch-dem.mjs              MDT05 del IGN por WCS (teselas ASCII Grid)
   build-data.mjs             genera public/data/*.json
   lib/network.mjs            grafo: tramos, carriles, maniobras, conflictos, semáforos, rotondas
   lib/catastro.mjs           lector GML en streaming y conversión UTM 30N → local
   lib/buildings.mjs          alturas, usos y monumentos
   lib/areas.mjs              usos del suelo y generación del Palmeral
+  lib/terrain.mjs            lectura y suavizado del MDT, rejilla de alturas ajustada a las calles
 src/sim/                     simulación (Web Worker)
   simulation.ts              IDM, MOBIL, cruces, altas/bajas, autobuses, indicadores
   network.ts router.ts signals.ts demand.ts
@@ -118,7 +132,8 @@ src/sim/                     simulación (Web Worker)
 src/render/                  Three.js
   scene.ts                   cámara, controles, sol, cielo, niebla, sombras
   roads.ts                   calzadas, marcas viales, congestión, cortes, rutas
-  buildings.ts vegetation.ts vehicles.ts signals.ts labels.ts landmarks.ts ground.ts
+  terrain.ts ground.ts        alturas, selección sobre el relieve y malla del terreno
+  buildings.ts vegetation.ts vehicles.ts signals.ts labels.ts landmarks.ts
 src/ui/                      estilos y gráfica
 ```
 
@@ -134,10 +149,14 @@ fotogramas en un portátil reciente.
   volumen y reparto horario, no en cada calle.
 - Los planes semafóricos se reconstruyen a partir de la posición de los semáforos, no de los
   planes reales del Ayuntamiento.
-- El cauce del Vinalopó se representa a nivel de calle y los túneles ocultan los vehículos.
+- El relieve tiene una resolución de 10 m en la escena y está suavizado: los taludes del
+  Vinalopó son algo más tendidos que en la realidad. Los túneles ocultan los vehículos.
+- La profundidad de los pasos inferiores sale de la capa de OSM (5,5 m por nivel), no de
+  proyectos reales.
 
 ## Licencias de los datos
 
 - Red viaria, usos del suelo, árboles, PDI y líneas de autobús: © colaboradores de
   OpenStreetMap, [ODbL](https://www.openstreetmap.org/copyright).
 - Edificios: © Dirección General del Catastro, servicio INSPIRE de edificios.
+- Relieve: MDT05 © Instituto Geográfico Nacional, [CC BY 4.0](https://www.ign.es/resources/licencia/Condiciones_licenciaUso_IGN.pdf).

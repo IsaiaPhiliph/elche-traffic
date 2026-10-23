@@ -5,6 +5,7 @@ import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import type { RoadsJSON } from './data';
+import type { Terrain } from './terrain';
 
 const RAMP: [number, THREE.Color][] = [
   [0, new THREE.Color(0.43, 0.06, 0.12)],
@@ -26,6 +27,8 @@ function rampColor(r: number, out: THREE.Color) {
 
 const TEX_W = 1024;
 const ROAD_Y = 0.18;
+const TUNNEL_H = 5; // gálibo hasta el techo del túnel
+const PARAPET = 0.9; // pretil sobre el borde de la trinchera
 
 function polyNormals(p: number[]) {
   const n = p.length / 3;
@@ -193,7 +196,7 @@ export class Roads {
   private heatLineEdge: Int32Array;
   private heatLineMat: LineMaterial;
 
-  constructor(roads: RoadsJSON, nEdges: number, night: { value: number }) {
+  constructor(roads: RoadsJSON, nEdges: number, night: { value: number }, private terrain: Terrain) {
     this.segs = roads.segments;
     const rows = Math.ceil(Math.max(1, nEdges) / TEX_W);
     this.heatData = new Uint8Array(TEX_W * rows * 4);
@@ -307,6 +310,15 @@ export class Roads {
     const skirtPos: number[] = [];
     const skirtIdx: number[] = [];
     const pillars: THREE.Matrix4[] = [];
+    const wallPos: number[] = [];
+    const wallIdx: number[] = [];
+    const ground = (x: number, z: number) => this.terrain.heightAt(x, z);
+    // Cuadrilátero vertical o inclinado con las dos caras (muros, techos y pretiles).
+    const quad = (a: number[], b: number[], c: number[], d: number[]) => {
+      const o = wallPos.length / 3;
+      wallPos.push(...a, ...b, ...c, ...d);
+      wallIdx.push(o, o + 1, o + 2, o, o + 2, o + 3);
+    };
     const walkColor = new THREE.Color(0xd3cdc2);
     const curbColor = new THREE.Color(0x9c978e);
 
@@ -329,7 +341,6 @@ export class Roads {
     };
 
     for (const s of roads.segments) {
-      if (s.f & 4) continue; // túneles: no se dibuja la calzada
       const norm = polyNormals(s.p);
       if (norm.n < 2) continue;
       const hw = s.w / 2;
@@ -341,7 +352,8 @@ export class Roads {
         aLanes.push(s.nF, s.nB, s.eF, s.eB);
         aFlags.push(s.sl | edgeLines);
       });
-      if (s.f & 8) {
+      if (s.f & 16) this.underpass(s.p, norm, hw, (s.f & 4) !== 0, ground, quad);
+      if (s.f & 8 && !(s.f & 16)) {
         const sw = s.c <= 7 ? 3.2 : 2.4;
         for (const side of [-1, 1]) {
           const a = side * hw;
@@ -352,17 +364,18 @@ export class Roads {
           strip(s.p, norm, Math.min(b, c), Math.max(b, c), 0.08, walkPos, walkIdx, push(walkColor));
         }
       }
-      // Puentes: cantos del tablero y pilas.
+      // Puentes: cantos del tablero y pilas (sobre el terreno, que en el Vinalopó queda muy abajo).
       let maxY = 0;
-      for (let i = 0; i < norm.n; i++) maxY = Math.max(maxY, s.p[3 * i + 1]);
-      if (maxY > 0.8) {
+      for (let i = 0; i < norm.n; i++) maxY = Math.max(maxY, s.p[3 * i + 1] - ground(s.p[3 * i], s.p[3 * i + 2]));
+      if (maxY > 0.8 && !(s.f & 16)) {
         for (const side of [-1, 1]) {
           const base = skirtPos.length / 3;
           for (let i = 0; i < norm.n; i++) {
             const sx = norm.nx[i] * side * hw * norm.sc[i];
             const sz = norm.nz[i] * side * hw * norm.sc[i];
             const y = s.p[3 * i + 1] + ROAD_Y;
-            skirtPos.push(s.p[3 * i] + sx, y, s.p[3 * i + 2] + sz, s.p[3 * i] + sx, Math.max(0, y - 1.3), s.p[3 * i + 2] + sz);
+            const gy = ground(s.p[3 * i] + sx, s.p[3 * i + 2] + sz);
+            skirtPos.push(s.p[3 * i] + sx, y, s.p[3 * i + 2] + sz, s.p[3 * i] + sx, Math.max(gy, y - 1.3), s.p[3 * i + 2] + sz);
             if (i > 0) {
               const a = base + 2 * (i - 1);
               if (side > 0) skirtIdx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
@@ -377,14 +390,15 @@ export class Roads {
           const x = s.p[3 * k - 3] + (s.p[3 * k] - s.p[3 * k - 3]) * t;
           const y = s.p[3 * k - 2] + (s.p[3 * k + 1] - s.p[3 * k - 2]) * t;
           const z = s.p[3 * k - 1] + (s.p[3 * k + 2] - s.p[3 * k - 1]) * t;
-          if (y < 2.5) continue;
-          // Pila transversal al tablero.
+          const gy = ground(x, z) - 0.5;
+          if (y - gy < 3) continue;
+          // Pila transversal al tablero, desde el terreno.
           const ang = Math.atan2(s.p[3 * k + 2] - s.p[3 * k - 1], s.p[3 * k] - s.p[3 * k - 3]);
           pillars.push(
             new THREE.Matrix4()
-              .makeTranslation(x, (y - 1.2) / 2, z)
+              .makeTranslation(x, (y - 1.2 + gy) / 2, z)
               .multiply(new THREE.Matrix4().makeRotationY(-ang + Math.PI / 2))
-              .multiply(new THREE.Matrix4().makeScale(Math.min(s.w * 0.6, 6), y - 1.2, 1.4)),
+              .multiply(new THREE.Matrix4().makeScale(Math.min(s.w * 0.6, 6), y - 1.2 - gy, 1.4)),
           );
         }
       }
@@ -434,6 +448,17 @@ export class Roads {
       sk.receiveShadow = true;
       this.group.add(sk);
     }
+    if (wallPos.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(wallPos, 3));
+      g.setIndex(wallIdx);
+      g.computeVertexNormals();
+      const walls = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: 0xaaa499, side: THREE.DoubleSide }));
+      walls.castShadow = true;
+      walls.receiveShadow = true;
+      walls.name = 'underpasses';
+      this.group.add(walls);
+    }
     if (pillars.length) {
       const pm = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: 0xbdb7ab }), pillars.length);
       pillars.forEach((m, i) => pm.setMatrixAt(i, m));
@@ -448,7 +473,7 @@ export class Roads {
       const n = r.length / 2;
       if (n < 3) continue;
       const base = iPos.length / 3;
-      for (let k = 0; k < n; k++) iPos.push(r[2 * k], 0.12, r[2 * k + 1]);
+      for (let k = 0; k < n; k++) iPos.push(r[2 * k], ground(r[2 * k], r[2 * k + 1]) + 0.24, r[2 * k + 1]);
       for (let k = 1; k < n - 1; k++) iIdx.push(base, base + k + 1, base + k);
     }
     const igeo = new THREE.BufferGeometry();
@@ -458,6 +483,68 @@ export class Roads {
     const isl = new THREE.Mesh(igeo, new THREE.MeshLambertMaterial({ color: 0x86ad62, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
     isl.receiveShadow = true;
     this.group.add(isl);
+  }
+
+  /**
+   * Paso inferior: muros de contención hasta la superficie (con pretil) donde la calzada va en
+   * trinchera; en el tramo cubierto, muros hasta el techo, el techo y las bocas del túnel.
+   */
+  private underpass(
+    P: number[], norm: ReturnType<typeof polyNormals>, hw: number, covered: boolean,
+    ground: (x: number, z: number) => number, quad: (a: number[], b: number[], c: number[], d: number[]) => void,
+  ) {
+    const off = hw + 0.6;
+    const n = norm.n;
+    const side = (i: number, sgn: number) => {
+      const s = sgn * off * norm.sc[i];
+      return [P[3 * i] + norm.nx[i] * s, P[3 * i + 2] + norm.nz[i] * s];
+    };
+    const surf = (i: number) => ground(P[3 * i], P[3 * i + 2]);
+    const roof = (i: number) => Math.min(surf(i) - 0.35, P[3 * i + 1] + TUNNEL_H);
+    for (let i = 1; i < n; i++) {
+      const dA = surf(i - 1) - P[3 * i - 2];
+      const dB = surf(i) - P[3 * i + 1];
+      if (Math.max(dA, dB) < 0.05) continue;
+      const yA = P[3 * i - 2] - 0.3;
+      const yB = P[3 * i + 1] - 0.3;
+      for (const sgn of [-1, 1]) {
+        const [ax, az] = side(i - 1, sgn);
+        const [bx, bz] = side(i, sgn);
+        const tA = covered ? roof(i - 1) : ground(ax, az) + PARAPET;
+        const tB = covered ? roof(i) : ground(bx, bz) + PARAPET;
+        quad([ax, yA, az], [bx, yB, bz], [bx, tB, bz], [ax, tA, az]);
+        if (!covered) {
+          // Albardilla: tapa la junta entre el muro y el borde recortado del suelo.
+          const w = 0.3 * sgn;
+          const ax2 = ax + norm.nx[i - 1] * w;
+          const az2 = az + norm.nz[i - 1] * w;
+          const bx2 = bx + norm.nx[i] * w;
+          const bz2 = bz + norm.nz[i] * w;
+          const ax1 = ax - norm.nx[i - 1] * w;
+          const az1 = az - norm.nz[i - 1] * w;
+          const bx1 = bx - norm.nx[i] * w;
+          const bz1 = bz - norm.nz[i] * w;
+          quad([ax1, tA, az1], [bx1, tB, bz1], [bx2, tB, bz2], [ax2, tA, az2]);
+        }
+      }
+      if (covered) {
+        const [lx0, lz0] = side(i - 1, -1);
+        const [rx0, rz0] = side(i - 1, 1);
+        const [lx1, lz1] = side(i, -1);
+        const [rx1, rz1] = side(i, 1);
+        quad([lx0, roof(i - 1), lz0], [lx1, roof(i), lz1], [rx1, roof(i), rz1], [rx0, roof(i - 1), rz0]);
+      }
+    }
+    if (!covered) return;
+    // Bocas: frente entre el techo y la superficie (más el pretil) en cada extremo.
+    for (const i of [0, n - 1]) {
+      if (surf(i) - P[3 * i + 1] < 2) continue;
+      const [lx, lz] = side(i, -1);
+      const [rx, rz] = side(i, 1);
+      const y0 = roof(i) - 0.4;
+      const y1 = surf(i) + PARAPET;
+      quad([lx, y0, lz], [rx, y0, rz], [rx, y1, rz], [lx, y1, lz]);
+    }
   }
 
   setHeat(heat: Uint8Array) {

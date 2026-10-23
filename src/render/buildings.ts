@@ -3,17 +3,21 @@
 import * as THREE from 'three';
 import earcut from 'earcut';
 import type { BuildingsJSON } from './data';
+import type { Terrain } from './terrain';
 
 const TILE = 450;
 
 const VERT_HEAD = /* glsl */ `
 attribute float aSeed;
+attribute float aBase;
+varying float vBase;
 varying vec3 vWPos;
 varying vec3 vWN;
 varying float vSeed;
 `;
 const FRAG_HEAD = /* glsl */ `
 uniform float uNight;
+varying float vBase;
 varying vec3 vWPos;
 varying vec3 vWN;
 varying float vSeed;
@@ -33,7 +37,7 @@ const FRAG_BODY = /* glsl */ `
   if (abs(wn.y) < 0.5) {
     vec2 t = normalize(vec2(-wn.z, wn.x));
     float u = dot(vWPos.xz, t);
-    float y = vWPos.y;
+    float y = vWPos.y - vBase; // altura sobre la acera
     float floorH = 3.05;
     float ground = 3.4;
     float lit = 0.0;
@@ -70,19 +74,19 @@ const FRAG_BODY = /* glsl */ `
 }
 `;
 
-export function buildBuildings(data: BuildingsJSON, night: { value: number }): THREE.Group {
+export function buildBuildings(data: BuildingsJSON, night: { value: number }, terrain: Terrain): THREE.Group {
   const group = new THREE.Group();
   group.name = 'buildings';
   const palette = data.palette.map((c) => new THREE.Color(c));
   const roofTint = new THREE.Color(0xb7b0a4);
-  const tiles = new Map<string, { pos: number[]; col: number[]; nrm: number[]; seed: number[]; idx: number[] }>();
+  const tiles = new Map<string, { pos: number[]; col: number[]; nrm: number[]; seed: number[]; base: number[]; idx: number[] }>();
   const d = data.data;
   let i = 0;
   let bid = 0;
   const tmp = new THREE.Color();
   while (i < d.length) {
-    const h = d[i] / 10;
-    const minH = d[i + 1] / 10;
+    let h = d[i] / 10;
+    let minH = d[i + 1] / 10;
     const color = palette[d[i + 2]] ?? palette[0];
     i += 4;
     const nr = d[i++];
@@ -104,9 +108,21 @@ export function buildBuildings(data: BuildingsJSON, night: { value: number }): T
     }
     cx /= outer.length / 2;
     cz /= outer.length / 2;
+    // Sobre el relieve: la cubierta a su altura sobre la cota media y el arranque por debajo
+    // del punto más bajo de la huella, para que no quede en el aire en las calles en pendiente.
+    let gMin = Infinity;
+    let gSum = 0;
+    for (let k = 0; k < outer.length; k += 2) {
+      const g = terrain.heightAt(outer[k], outer[k + 1]);
+      gMin = Math.min(gMin, g);
+      gSum += g;
+    }
+    const gMean = gSum / (outer.length / 2);
+    h += gMean;
+    minH = minH > 0 ? minH + gMean : gMin - 0.4;
     const key = `${Math.floor(cx / TILE)}:${Math.floor(cz / TILE)}`;
     let T = tiles.get(key);
-    if (!T) tiles.set(key, (T = { pos: [], col: [], nrm: [], seed: [], idx: [] }));
+    if (!T) tiles.set(key, (T = { pos: [], col: [], nrm: [], seed: [], base: [], idx: [] }));
     const seed = (bid++ * 0.618034) % 1;
     // Fachadas
     for (const r of rings) {
@@ -129,6 +145,7 @@ export function buildBuildings(data: BuildingsJSON, night: { value: number }): T
         const nz = Math.round((-ex / el) * 127);
         T.nrm.push(nx, 0, nz, nx, 0, nz, nx, 0, nz, nx, 0, nz);
         T.seed.push(seed, seed, seed, seed);
+        T.base.push(gMean, gMean, gMean, gMean);
         T.idx.push(base, base + 2, base + 1, base, base + 3, base + 2);
       }
     }
@@ -147,6 +164,7 @@ export function buildBuildings(data: BuildingsJSON, night: { value: number }): T
       T.col.push(tmp.r, tmp.g, tmp.b);
       T.nrm.push(0, 127, 0);
       T.seed.push(seed);
+      T.base.push(gMean);
     }
     for (let k = 0; k < tris.length; k += 3) {
       const a = tris[k];
@@ -163,7 +181,7 @@ export function buildBuildings(data: BuildingsJSON, night: { value: number }): T
     sh.uniforms.uNight = night;
     sh.vertexShader = VERT_HEAD + sh.vertexShader.replace(
       '#include <worldpos_vertex>',
-      '#include <worldpos_vertex>\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz; vWN = normal; vSeed = aSeed;',
+      '#include <worldpos_vertex>\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz; vWN = normal; vSeed = aSeed; vBase = aBase;',
     );
     sh.fragmentShader = FRAG_HEAD + sh.fragmentShader
       .replace('#include <color_fragment>', '#include <color_fragment>\nvec3 nightGlow = vec3(0.0);\n' + FRAG_BODY)
@@ -175,6 +193,7 @@ export function buildBuildings(data: BuildingsJSON, night: { value: number }): T
     geo.setAttribute('color', new THREE.BufferAttribute(Uint8Array.from(T.col, (v) => Math.round(v * 255)), 3, true));
     geo.setAttribute('normal', new THREE.BufferAttribute(Int8Array.from(T.nrm), 3, true));
     geo.setAttribute('aSeed', new THREE.BufferAttribute(Uint8Array.from(T.seed, (v) => Math.round(v * 255)), 1, true));
+    geo.setAttribute('aBase', new THREE.Float32BufferAttribute(T.base, 1));
     geo.setIndex(T.pos.length / 3 > 65535 ? new THREE.Uint32BufferAttribute(T.idx, 1) : new THREE.Uint16BufferAttribute(T.idx, 1));
     geo.computeBoundingSphere();
     const mesh = new THREE.Mesh(geo, mat);

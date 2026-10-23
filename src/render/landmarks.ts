@@ -1,6 +1,7 @@
 // Detalles de los monumentos más reconocibles que la huella del edificio no recoge.
 import * as THREE from 'three';
 import type { POI } from './data';
+import type { Terrain } from './terrain';
 
 const STONE = 0xcdb084;
 
@@ -34,9 +35,13 @@ function basilica(x: number, z: number): THREE.Group {
   return g;
 }
 
-export function buildLandmarks(pois: POI[]): THREE.Group {
+export function buildLandmarks(pois: POI[], terrain: Terrain): THREE.Group {
   const g = new THREE.Group();
   const b = pois.find((p) => /Basílica de Santa María/.test(p.name));
-  if (b) g.add(basilica(b.x, b.z));
+  if (b) {
+    const m = basilica(b.x, b.z);
+    m.position.y = terrain.heightAt(b.x, b.z);
+    g.add(m);
+  }
   return g;
 }

@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
 import type { POI } from './data';
+import type { Terrain } from './terrain';
 
 export class Labels {
   readonly renderer = new CSS2DRenderer();
@@ -10,7 +11,7 @@ export class Labels {
   private placed: number[] = [];
   private v = new THREE.Vector3();
 
-  constructor(private container: HTMLElement, pois: POI[]) {
+  constructor(private container: HTMLElement, pois: POI[], private terrain: Terrain) {
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     Object.assign(this.renderer.domElement.style, { position: 'absolute', inset: '0', pointerEvents: 'none' });
     container.appendChild(this.renderer.domElement);
@@ -20,7 +21,7 @@ export class Labels {
       el.className = 'poi-label' + (p.imp < 7 ? ' minor' : '');
       el.innerHTML = `<i></i>${p.name}`;
       const obj = new CSS2DObject(el);
-      obj.position.set(p.x, 24, p.z);
+      obj.position.set(p.x, terrain.heightAt(p.x, p.z) + 24, p.z);
       this.group.add(obj);
       this.items.push({ obj, el, imp: p.imp, w: 0, h: 0 });
     }
@@ -32,7 +33,7 @@ export class Labels {
     if (!this.group.visible) return;
     const camPos = camera.position;
     // A ras de suelo las etiquetas lejanas atravesarían los edificios: solo las cercanas.
-    const low = camPos.y < 140;
+    const low = camPos.y - this.terrain.heightAt(camPos.x, camPos.z) < 140;
     const W = this.container.clientWidth;
     const H = this.container.clientHeight;
     const placed = this.placed;

@@ -10,6 +10,7 @@ import { Vehicles } from './render/vehicles';
 import { SignalViews } from './render/signals';
 import { Labels } from './render/labels';
 import { buildLandmarks } from './render/landmarks';
+import { Terrain } from './render/terrain';
 import { Chart } from './ui/chart';
 import type { EdgeInfo, FromWorker, ReadyInfo, ToWorker } from './sim/protocol';
 import type { SimStats, VehicleInfo } from './sim/simulation';
@@ -55,7 +56,8 @@ async function main() {
   progress(0.02, 'Descargando datos de Elche…');
   const city = await loadCity(DATA, (f, label) => progress(0.05 + f * 0.33, `${label} cargado`));
   const viewport = $('viewport');
-  const sm = new SceneManager(viewport);
+  const terrain = new Terrain(city.terrain?.meta ?? null, city.terrain?.bin ?? null);
+  const sm = new SceneManager(viewport, terrain);
 
   // El worker arranca en paralelo con la generación de geometría.
   worker = new Worker(new URL('./sim/worker.ts', import.meta.url), { type: 'module' });
@@ -73,22 +75,22 @@ async function main() {
   const ext = extentOf(city);
   progress(0.42, 'Pintando el terreno y el Palmeral…');
   await nextFrame();
-  sm.scene.add(buildGround(city.areas, city.roads, ext, sm.renderer.capabilities.maxTextureSize));
+  sm.scene.add(buildGround(city.areas, city.roads, ext, sm.renderer.capabilities.maxTextureSize, terrain));
   progress(0.52, 'Trazando 490 km de calles…');
   await nextFrame();
   const nEdges = city.roads.segments.reduce((m, s) => Math.max(m, s.eF, s.eB), 0) + 1;
-  const roads = new Roads(city.roads, nEdges, shared.uNight);
+  const roads = new Roads(city.roads, nEdges, shared.uNight, terrain);
   sm.scene.add(roads.group);
   progress(0.62, `Levantando ${fmtInt(city.buildings.count)} edificios del Catastro…`);
   await nextFrame();
-  const buildings = buildBuildings(city.buildings, shared.uNight);
-  buildings.add(buildLandmarks(city.pois));
+  const buildings = buildBuildings(city.buildings, shared.uNight, terrain);
+  buildings.add(buildLandmarks(city.pois, terrain));
   sm.scene.add(buildings);
   progress(0.74, `Plantando ${fmtInt(city.trees.count)} palmeras y árboles…`);
   await nextFrame();
-  const trees = buildVegetation(city.trees);
+  const trees = buildVegetation(city.trees, terrain);
   sm.scene.add(trees);
-  const labels = new Labels(viewport, city.pois);
+  const labels = new Labels(viewport, city.pois, terrain);
   sm.scene.add(labels.group);
   progress(0.86, 'Calentando la simulación (15 min de tráfico)…');
   ready = await readyPromise;
@@ -96,7 +98,7 @@ async function main() {
   sm.scene.add(vehicles.group);
   const signals = new SignalViews(ready.heads, roads);
   sm.scene.add(signals.group);
-  const zbeMesh = buildZbe(ready.zbe);
+  const zbeMesh = buildZbe(ready.zbe, terrain);
   zbeMesh.visible = false;
   sm.scene.add(zbeMesh);
   progress(1, 'Listo');
@@ -286,7 +288,6 @@ async function main() {
 
   // ---------------------------------------------------------------- selección con el ratón
   const ray = new THREE.Raycaster();
-  const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.2);
   let downAt: [number, number] | null = null;
   viewport.addEventListener('pointerdown', (ev) => (downAt = [ev.clientX, ev.clientY]));
   viewport.addEventListener('pointerup', (ev) => {
@@ -294,7 +295,7 @@ async function main() {
     const r = viewport.getBoundingClientRect();
     ray.setFromCamera(new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1), sm.camera);
     const hit = new THREE.Vector3();
-    if (!ray.ray.intersectPlane(plane, hit)) return;
+    if (!terrain.raycast(ray.ray, hit)) return;
     const dist = sm.camera.position.distanceTo(hit);
     const tol = Math.max(3, dist * 0.012);
     if (state.tool === 'close') {
@@ -332,6 +333,7 @@ async function main() {
   // ---------------------------------------------------------------- cámara: vuelos y presets
   let flight: null | { t0: number; dur: number; fromPos: THREE.Vector3; fromTgt: THREE.Vector3; toPos: THREE.Vector3; toTgt: THREE.Vector3 } = null;
   function flyTo(target: THREE.Vector3, distance: number, polarDeg = 50, azimuthDeg = 30) {
+    target = target.clone().setY(terrain.heightAt(target.x, target.z));
     const pol = (polarDeg * Math.PI) / 180;
     const az = (azimuthDeg * Math.PI) / 180;
     const offset = new THREE.Vector3(Math.sin(pol) * Math.sin(az), Math.cos(pol), Math.sin(pol) * Math.cos(az)).multiplyScalar(distance);
@@ -633,7 +635,10 @@ async function main() {
       lastQuery = now;
       showSignal(state.selected.i);
     }
-    if (!state.driver) sm.controls.update();
+    if (!state.driver) {
+      sm.controls.update();
+      if (!flight) keepAboveTerrain(sm, dt);
+    }
     roads.updateHeatLines(sm.camera.position.distanceTo(sm.controls.target), viewport.clientWidth, viewport.clientHeight);
     sm.setTime(frameT || state.simTime);
     updateClock();
@@ -641,6 +646,22 @@ async function main() {
     labels.render(sm.scene, sm.camera, state.driver);
   }
   requestAnimationFrame(loop);
+}
+
+/**
+ * Al desplazarse sobre el relieve, el punto de mira sigue la cota del terreno (con la cámara) y la
+ * cámara nunca baja del suelo.
+ */
+function keepAboveTerrain(sm: SceneManager, dt: number) {
+  const t = sm.controls.target;
+  const dy = (sm.terrain.heightAt(t.x, t.z) - t.y) * (1 - Math.exp(-dt * 4));
+  if (Math.abs(dy) > 1e-3) {
+    t.y += dy;
+    sm.camera.position.y += dy;
+  }
+  const c = sm.camera.position;
+  const floor = sm.terrain.heightAt(c.x, c.z) + 4;
+  if (c.y < floor) c.y = floor;
 }
 
 function extentOf(city: CityData) {
@@ -659,22 +680,48 @@ function extentOf(city: CityData) {
   return { minX: minX - 200, minZ: minZ - 200, maxX: maxX + 200, maxZ: maxZ + 200 };
 }
 
-function buildZbe(poly: [number, number][]): THREE.Group {
+function buildZbe(poly: [number, number][], terrain: Terrain): THREE.Group {
   const g = new THREE.Group();
-  const shape = new THREE.Shape(poly.map(([x, z]) => new THREE.Vector2(x, -z)));
+  // Velo sobre el relieve: celdas de 10 m dentro del polígono, a 0,6 m del suelo.
+  const inside = (x: number, z: number) => {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, zi] = poly[i];
+      const [xj, zj] = poly[j];
+      if (zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) c = !c;
+    }
+    return c;
+  };
+  const xs = poly.map((p) => p[0]);
+  const zs = poly.map((p) => p[1]);
+  const C = 10;
+  const fp: number[] = [];
+  const y = (x: number, z: number) => terrain.heightAt(x, z) + 0.6;
+  for (let x = Math.floor(Math.min(...xs) / C) * C; x < Math.max(...xs); x += C) {
+    for (let z = Math.floor(Math.min(...zs) / C) * C; z < Math.max(...zs); z += C) {
+      if (!inside(x + C / 2, z + C / 2)) continue;
+      const a = [x, y(x, z), z];
+      const b = [x + C, y(x + C, z), z];
+      const c = [x + C, y(x + C, z + C), z + C];
+      const d = [x, y(x, z + C), z + C];
+      fp.push(...a, ...d, ...b, ...b, ...d, ...c);
+    }
+  }
+  const fg = new THREE.BufferGeometry();
+  fg.setAttribute('position', new THREE.Float32BufferAttribute(fp, 3));
   const fill = new THREE.Mesh(
-    new THREE.ShapeGeometry(shape),
+    fg,
     new THREE.MeshBasicMaterial({ color: 0x47c27a, transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide }),
   );
-  fill.rotation.x = -Math.PI / 2;
-  fill.position.y = 0.6;
   // Cortina luminosa a lo largo del perímetro, visible por encima de los tejados.
   const pos: number[] = [];
   const col: number[] = [];
   for (let i = 0; i < poly.length; i++) {
     const [ax, az] = poly[i];
     const [bx, bz] = poly[(i + 1) % poly.length];
-    pos.push(ax, 0, az, bx, 0, bz, bx, 34, bz, ax, 0, az, bx, 34, bz, ax, 34, az);
+    const ya = terrain.heightAt(ax, az);
+    const yb = terrain.heightAt(bx, bz);
+    pos.push(ax, ya, az, bx, yb, bz, bx, yb + 34, bz, ax, ya, az, bx, yb + 34, bz, ax, ya + 34, az);
     col.push(1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0);
   }
   const wg = new THREE.BufferGeometry();
@@ -684,7 +731,7 @@ function buildZbe(poly: [number, number][]): THREE.Group {
     wg,
     new THREE.MeshBasicMaterial({ color: 0x47c27a, vertexColors: true, transparent: true, opacity: 0.55, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending }),
   );
-  const pts = poly.map(([x, z]) => new THREE.Vector3(x, 34, z));
+  const pts = poly.map(([x, z]) => new THREE.Vector3(x, terrain.heightAt(x, z) + 34, z));
   pts.push(pts[0].clone());
   const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x9bf0bd, transparent: true, opacity: 0.6 }));
   g.add(fill, wall, line);

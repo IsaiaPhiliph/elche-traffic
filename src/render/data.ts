@@ -1,4 +1,5 @@
 // Tipos y carga de los ficheros de public/data.
+import type { TerrainJSON } from './terrain';
 
 export interface RoadSegment {
   p: number[]; // x, y, z intercalados (eje recortado en los cruces)
@@ -8,7 +9,7 @@ export interface RoadSegment {
   c: number;
   eF: number;
   eB: number;
-  f: number; // 1 glorieta, 2 puente, 4 túnel, 8 aceras
+  f: number; // 1 glorieta, 2 puente, 4 túnel, 8 aceras, 16 bajo la rasante (paso inferior)
   n: number;
   sl: number; // marcas de detención (ver build-data.mjs)
 }
@@ -54,6 +55,8 @@ export interface CityData {
   areas: AreasJSON;
   trees: TreesJSON;
   pois: POI[];
+  /** Relieve (opcional: sin él la ciudad es plana). */
+  terrain: { meta: TerrainJSON; bin: ArrayBuffer } | null;
 }
 
 export async function loadCity(base: string, onProgress: (f: number, label: string) => void): Promise<CityData> {
@@ -66,14 +69,23 @@ export async function loadCity(base: string, onProgress: (f: number, label: stri
   ];
   const out: Partial<CityData> = {};
   let done = 0;
-  await Promise.all(
-    files.map(async ([key, file, label]) => {
+  const total = files.length + 1;
+  const terrain = (async () => {
+    const [m, b] = await Promise.all([fetch(base + 'terrain.json'), fetch(base + 'terrain.bin')]);
+    const ok = m.ok && b.ok && (m.headers.get('content-type') ?? '').includes('json');
+    out.terrain = ok ? { meta: await m.json(), bin: await b.arrayBuffer() } : null;
+    done++;
+    onProgress(done / total, 'Relieve (MDT05 del IGN)');
+  })();
+  await Promise.all([
+    terrain,
+    ...files.map(async ([key, file, label]) => {
       const res = await fetch(base + file);
       if (!res.ok) throw new Error(`No se pudo cargar ${file} (${res.status})`);
       (out as Record<string, unknown>)[key] = await res.json();
       done++;
-      onProgress(done / files.length, label);
+      onProgress(done / total, label);
     }),
-  );
+  ]);
   return out as CityData;
 }

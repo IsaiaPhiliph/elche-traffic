@@ -1,6 +1,7 @@
 // Escena, cámara, controles, cielo e iluminación según la hora (sol real de Elche).
 import * as THREE from 'three';
 import { MapControls } from 'three/addons/controls/MapControls.js';
+import type { Terrain } from './terrain';
 
 const DEG = Math.PI / 180;
 const LAT = 38.27 * DEG;
@@ -81,7 +82,7 @@ export class SceneManager {
   sunState: SunState = sunAt(12, 135);
   dayOfYear = 135;
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, readonly terrain: Terrain) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(container.clientWidth, container.clientHeight);
@@ -214,7 +215,8 @@ export class SceneManager {
     this.fog.far = Math.min(cam.far * 0.85, this.fog.near + Math.max(7000, dist * 3.5));
     // Plano cercano según la altura: con near fijo de 2 m, desde lejos el búfer de profundidad
     // no distingue capas separadas por centímetros (suelo, calzadas, aceras) y parpadean.
-    const near = THREE.MathUtils.clamp((cam.position.y - 100) * 0.4, 1.5, 4000);
+    const clearance = cam.position.y - this.terrain.heightAt(cam.position.x, cam.position.z);
+    const near = THREE.MathUtils.clamp((clearance - 100) * 0.4, 1.5, 4000);
     if (Math.abs(near - cam.near) > cam.near * 0.05) {
       cam.near = near;
       cam.updateProjectionMatrix();
