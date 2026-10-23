@@ -70,7 +70,7 @@ button, input, select { font: inherit; color: inherit; }
 .row .lbl { width: 92px; color: var(--muted); flex: none; }
 .row output { width: 52px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
 input[type='range'] { flex: 1; accent-color: var(--accent); min-width: 0; }
-select { flex: 1; background: rgba(255, 255, 255, 0.06); border: 1px solid var(--line-strong); border-radius: 8px; padding: 6px 8px; }
+select { flex: 1; min-width: 0; text-overflow: ellipsis; background: rgba(255, 255, 255, 0.06); border: 1px solid var(--line-strong); border-radius: 8px; padding: 6px 8px; }
 select option { background: #18222b; }
 .check { display: flex; align-items: center; gap: 8px; margin: 7px 0; cursor: pointer; color: #d5dde3; }
 .check input { accent-color: var(--accent); width: 15px; height: 15px; }
