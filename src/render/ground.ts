@@ -22,6 +22,9 @@ export const AREA_COLORS: Record<string, string> = {
   water: '#6fa3c2',
 };
 const BASE = '#cfc6af';
+/** Campo de Elche alrededor del área de estudio; el borde de la textura se funde con él. */
+const OUTSIDE = '#bfb796';
+const EDGE_FADE = 450; // m
 
 export interface GroundExtent {
   minX: number;
@@ -148,6 +151,19 @@ export function buildGround(areas: AreasJSON, roads: RoadsJSON, ext: GroundExten
   g.fillStyle = g.createPattern(nc, 'repeat')!;
   g.fillRect(0, 0, cw, ch);
   g.globalCompositeOperation = 'source-over';
+  // Borde difuminado hacia el color exterior: sin él se ve el rectángulo del mapa desde lejos.
+  const fade = EDGE_FADE * scale;
+  const edge = (x0: number, y0: number, x1: number, y1: number, rx: number, ry: number, rw: number, rh: number) => {
+    const grad = g.createLinearGradient(x0, y0, x1, y1);
+    grad.addColorStop(0, OUTSIDE);
+    grad.addColorStop(1, OUTSIDE + '00');
+    g.fillStyle = grad;
+    g.fillRect(rx, ry, rw, rh);
+  };
+  edge(0, 0, fade, 0, 0, 0, fade, ch);
+  edge(cw, 0, cw - fade, 0, cw - fade, 0, fade, ch);
+  edge(0, 0, 0, fade, 0, 0, cw, fade);
+  edge(0, ch, 0, ch - fade, 0, ch - fade, cw, fade);
 
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
@@ -164,10 +180,31 @@ export function buildGround(areas: AreasJSON, roads: RoadsJSON, ext: GroundExten
   mesh.name = 'ground';
   group.add(mesh);
 
-  // Entorno más allá del área de estudio (camp d'Elx).
-  const under = new THREE.Mesh(new THREE.PlaneGeometry(52000, 52000), new THREE.MeshLambertMaterial({ color: 0xbfb796 }));
-  under.rotation.x = -Math.PI / 2;
-  under.position.set(ext.minX + W / 2, -0.6, ext.minZ + H / 2);
+  // Entorno más allá del área de estudio (camp d'Elx), con un hueco donde va el mapa para que
+  // ambos planos no se solapen (desde lejos se pelearían en el búfer de profundidad).
+  const R = 100000;
+  const inset = 2;
+  const outer = new THREE.Shape([
+    new THREE.Vector2(-R, -R),
+    new THREE.Vector2(R, -R),
+    new THREE.Vector2(R, R),
+    new THREE.Vector2(-R, R),
+  ]);
+  // La forma se dibuja en XY y se gira: y de la forma = −z del mundo.
+  outer.holes.push(
+    new THREE.Path([
+      new THREE.Vector2(ext.minX + inset, -(ext.maxZ - inset)),
+      new THREE.Vector2(ext.minX + inset, -(ext.minZ + inset)),
+      new THREE.Vector2(ext.maxX - inset, -(ext.minZ + inset)),
+      new THREE.Vector2(ext.maxX - inset, -(ext.maxZ - inset)),
+    ]),
+  );
+  const underGeo = new THREE.ShapeGeometry(outer);
+  underGeo.rotateX(-Math.PI / 2);
+  const under = new THREE.Mesh(underGeo, new THREE.MeshLambertMaterial({ color: OUTSIDE }));
+  under.position.y = -0.05;
+  under.receiveShadow = true;
+  under.name = 'outside';
   group.add(under);
   return group;
 }

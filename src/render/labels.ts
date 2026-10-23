@@ -6,9 +6,11 @@ import type { POI } from './data';
 export class Labels {
   readonly renderer = new CSS2DRenderer();
   readonly group = new THREE.Group();
-  private items: { obj: CSS2DObject; el: HTMLElement; imp: number }[] = [];
+  private items: { obj: CSS2DObject; el: HTMLElement; imp: number; w: number; h: number }[] = [];
+  private placed: number[] = [];
+  private v = new THREE.Vector3();
 
-  constructor(container: HTMLElement, pois: POI[]) {
+  constructor(private container: HTMLElement, pois: POI[]) {
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     Object.assign(this.renderer.domElement.style, { position: 'absolute', inset: '0', pointerEvents: 'none' });
     container.appendChild(this.renderer.domElement);
@@ -20,8 +22,10 @@ export class Labels {
       const obj = new CSS2DObject(el);
       obj.position.set(p.x, 24, p.z);
       this.group.add(obj);
-      this.items.push({ obj, el, imp: p.imp });
+      this.items.push({ obj, el, imp: p.imp, w: 0, h: 0 });
     }
+    // Los más importantes primero: ganan cuando dos etiquetas se pisan.
+    this.items.sort((a, b) => b.imp - a.imp);
   }
 
   render(scene: THREE.Scene, camera: THREE.Camera, hidden = false) {
@@ -29,15 +33,36 @@ export class Labels {
     const camPos = camera.position;
     // A ras de suelo las etiquetas lejanas atravesarían los edificios: solo las cercanas.
     const low = camPos.y < 140;
+    const W = this.container.clientWidth;
+    const H = this.container.clientHeight;
+    const placed = this.placed;
+    placed.length = 0;
     for (const it of this.items) {
       const d = it.obj.position.distanceTo(camPos);
       // Los secundarios solo se muestran al acercarse.
-      let maxD = it.imp >= 8 ? 9000 : it.imp >= 7 ? 4500 : 2500;
+      let maxD = it.imp >= 8 ? 16000 : it.imp >= 7 ? 4500 : 2500;
       if (low) maxD = Math.min(maxD, 450);
       if (hidden) maxD = 0;
       const o = d > maxD ? 0 : d > maxD * 0.7 ? (maxD - d) / (maxD * 0.3) : 1;
+      let show = o > 0.02;
+      if (show) {
+        // Desde lejos el centro histórico amontona etiquetas: se ocultan las que pisan a otra.
+        const p = this.v.copy(it.obj.position).project(camera);
+        const x = (p.x * 0.5 + 0.5) * W;
+        const y = (0.5 - p.y * 0.5) * H;
+        if (!it.w) {
+          it.w = it.el.offsetWidth;
+          it.h = it.el.offsetHeight;
+        }
+        const hw = it.w / 2 + 3;
+        const hh = it.h / 2 + 2;
+        for (let k = 0; k < placed.length && show; k += 4) {
+          if (Math.abs(x - placed[k]) < hw + placed[k + 2] && Math.abs(y - placed[k + 1]) < hh + placed[k + 3]) show = false;
+        }
+        if (show && p.z < 1) placed.push(x, y, hw, hh);
+      }
       it.el.style.opacity = o.toFixed(2);
-      it.obj.visible = o > 0.02;
+      it.obj.visible = show;
     }
     this.renderer.render(scene, camera);
   }

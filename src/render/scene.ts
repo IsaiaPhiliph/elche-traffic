@@ -59,8 +59,12 @@ void main() {
     float st = step(0.9965, hash(q)) * uNight * smoothstep(0.05, 0.4, h);
     col += vec3(st * 0.9);
   }
+  // La niebla de three.js se aplica después del tone mapping: junto al horizonte el cielo va sin
+  // él para que su color coincida con el del suelo difuminado y no aparezca una franja.
+  #ifdef TONE_MAPPING
+  col = mix(col, toneMapping(col), smoothstep(0.01, 0.2, abs(h)));
+  #endif
   gl_FragColor = vec4(col, 1.0);
-  #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }`;
 
@@ -87,7 +91,7 @@ export class SceneManager {
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     container.appendChild(this.renderer.domElement);
 
-    this.camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 2, 30000);
+    this.camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 2, 90000);
     this.camera.position.set(900, 1300, 1700);
     this.controls = new MapControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
@@ -203,9 +207,18 @@ export class SceneManager {
   render() {
     this.updateShadowFrustum();
     // Niebla proporcional a la distancia de observación: nítida desde arriba, profunda a ras de suelo.
-    const dist = this.camera.position.distanceTo(this.controls.target);
+    // Siempre se cierra antes del plano lejano, para que el suelo se funda con el horizonte.
+    const cam = this.camera;
+    const dist = cam.position.distanceTo(this.controls.target);
     this.fog.near = Math.max(1200, dist * 1.1);
-    this.fog.far = this.fog.near + Math.max(7000, dist * 3.5);
+    this.fog.far = Math.min(cam.far * 0.85, this.fog.near + Math.max(7000, dist * 3.5));
+    // Plano cercano según la altura: con near fijo de 2 m, desde lejos el búfer de profundidad
+    // no distingue capas separadas por centímetros (suelo, calzadas, aceras) y parpadean.
+    const near = THREE.MathUtils.clamp((cam.position.y - 100) * 0.4, 1.5, 4000);
+    if (Math.abs(near - cam.near) > cam.near * 0.05) {
+      cam.near = near;
+      cam.updateProjectionMatrix();
+    }
     this.renderer.render(this.scene, this.camera);
   }
 }
